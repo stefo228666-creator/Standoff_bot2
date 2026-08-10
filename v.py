@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import asyncio
+import os
 
 TOKEN = "8698059562:AAFco5fVhthHvByAzSx1rOfvcKiQcY7HX8o"
 DEVELOPER_ID = 6650102723
@@ -193,7 +194,7 @@ def init_db():
     conn = sqlite3.connect("cases_bot.db")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (telegram_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, reg_date TEXT, last_bonus TIMESTAMP DEFAULT "1970-01-01 00:00:00", username TEXT)''')
+                 (telegram_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0, reg_date TEXT, last_bonus TIMESTAMP DEFAULT "1970-01-01 00:00:00", username TEXT, referrer_id INTEGER DEFAULT 0, ref_bonus_claimed INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS inventory
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   telegram_id INTEGER, 
@@ -204,14 +205,27 @@ def init_db():
                   case_name TEXT, 
                   open_date TEXT, 
                   sold INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS referrals
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  referrer_id INTEGER,
+                  referral_id INTEGER,
+                  date TEXT,
+                  bonus_claimed INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  telegram_id INTEGER,
+                  action TEXT,
+                  amount REAL,
+                  details TEXT,
+                  date TEXT)''')
     conn.commit()
     conn.close()
 
-def register_user(telegram_id, username=None):
+def register_user(telegram_id, username=None, referrer_id=0):
     conn = sqlite3.connect("cases_bot.db")
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (telegram_id, reg_date, last_bonus, username) VALUES (?, ?, ?, ?)", 
-              (telegram_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "1970-01-01 00:00:00", username))
+    c.execute("INSERT OR IGNORE INTO users (telegram_id, reg_date, last_bonus, username, referrer_id) VALUES (?, ?, ?, ?, ?)", 
+              (telegram_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "1970-01-01 00:00:00", username, referrer_id))
     if username:
         c.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
     conn.commit()
@@ -328,6 +342,77 @@ def update_last_bonus(telegram_id):
     conn.commit()
     conn.close()
 
+def add_log(telegram_id, action, amount=0, details=""):
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO logs (telegram_id, action, amount, details, date) VALUES (?, ?, ?, ?, ?)",
+              (telegram_id, action, amount, details, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def get_user_logs(telegram_id, limit=50):
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT action, amount, details, date FROM logs WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+              (telegram_id, limit))
+    result = c.fetchall()
+    conn.close()
+    return result
+
+def get_all_users():
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT telegram_id FROM users")
+    result = c.fetchall()
+    conn.close()
+    return [row[0] for row in result]
+
+def get_referrals(referrer_id):
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT referral_id, date, bonus_claimed FROM referrals WHERE referrer_id = ? ORDER BY id DESC", (referrer_id,))
+    result = c.fetchall()
+    conn.close()
+    return result
+
+def get_all_referrals():
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT r.referrer_id, u1.username, r.referral_id, u2.username, r.date, r.bonus_claimed FROM referrals r LEFT JOIN users u1 ON r.referrer_id = u1.telegram_id LEFT JOIN users u2 ON r.referral_id = u2.telegram_id ORDER BY r.id DESC")
+    result = c.fetchall()
+    conn.close()
+    return result
+
+def add_referral(referrer_id, referral_id):
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO referrals (referrer_id, referral_id, date, bonus_claimed) VALUES (?, ?, ?, 0)",
+              (referrer_id, referral_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def check_referral_bonus(referral_id):
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("SELECT id, referrer_id, bonus_claimed FROM referrals WHERE referral_id = ?", (referral_id,))
+    result = c.fetchone()
+    conn.close()
+    if result:
+        return {"id": result[0], "referrer_id": result[1], "bonus_claimed": result[2]}
+    return None
+
+def claim_referral_bonus(referral_id):
+    conn = sqlite3.connect("cases_bot.db")
+    c = conn.cursor()
+    c.execute("UPDATE referrals SET bonus_claimed = 1 WHERE referral_id = ? AND bonus_claimed = 0", (referral_id,))
+    conn.commit()
+    c.execute("SELECT referrer_id FROM referrals WHERE referral_id = ?", (referral_id,))
+    result = c.fetchone()
+    conn.close()
+    if result:
+        return result[0]
+    return None
+
 def weighted_choice(items):
     total_weight = sum(item.get("weight", 1) for item in items)
     rand = random.uniform(0, total_weight)
@@ -368,12 +453,21 @@ def main_menu(user_id=None):
         [InlineKeyboardButton("🎁 Бесплатный бонус (+20 G)", callback_data="bonus")],
         [InlineKeyboardButton("💣 Мини-игра: Мины", callback_data="mines_menu")],
         [InlineKeyboardButton("🎰 Мини-игра: Колесо Фортуны", callback_data="fortune_menu")],
-        [InlineKeyboardButton("📜 История", callback_data="history")]
+        [InlineKeyboardButton("📜 История", callback_data="history")],
+        [InlineKeyboardButton("👔 Сотрудничество", callback_data="collab")]
     ]
     if user_id == DEVELOPER_ID:
-        buttons.append([InlineKeyboardButton("👑 Пополнить игрока", callback_data="dev_add_balance")])
+        buttons.append([InlineKeyboardButton("👑 Админ-панель", callback_data="admin_panel")])
         buttons.append([InlineKeyboardButton("💰 +10000 G (DEV)", callback_data="add_dev_10000")])
     return InlineKeyboardMarkup(buttons)
+
+def admin_panel_buttons():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Логи", callback_data="admin_logs")],
+        [InlineKeyboardButton("👥 Реф система", callback_data="admin_refs")],
+        [InlineKeyboardButton("📢 Сообщение всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+    ])
 
 def case_buttons():
     buttons = []
@@ -390,6 +484,7 @@ def profile_menu():
         [InlineKeyboardButton("📦 Инвентарь", callback_data="inventory")],
         [InlineKeyboardButton("💰 Продать скин", callback_data="sell_menu")],
         [InlineKeyboardButton("💎 Вывод скина", callback_data="withdraw_menu")],
+        [InlineKeyboardButton("👥 Реферальная система", callback_data="referral_system")],
         [InlineKeyboardButton("🛠 Тех. Поддержка", callback_data="support")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ])
@@ -479,6 +574,10 @@ selected_box_cache = {}
 waiting_for_bet = {}
 deposit_timer = {}
 dev_add_data = {}
+waiting_for_collab = {}
+support_requests = {}
+admin_state = {}
+broadcast_data = {}
 
 async def schedule_deposit_check(user_id, chat_id, context):
     await asyncio.sleep(60)
@@ -498,7 +597,23 @@ async def schedule_deposit_check(user_id, chat_id, context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username
-    register_user(user_id, username)
+    
+    referrer_id = 0
+    if context.args:
+        try:
+            referrer_id = int(context.args[0])
+            if referrer_id == user_id:
+                referrer_id = 0
+        except:
+            pass
+    
+    register_user(user_id, username, referrer_id)
+    
+    if referrer_id > 0:
+        existing = check_referral_bonus(user_id)
+        if not existing:
+            add_referral(referrer_id, user_id)
+    
     await update.message.reply_text(
         f"🔥 Добро пожаловать в открытие кейсов «ВЕЗУНЧИК»!\n\n"
         f"Испытай удачу и выбей топовый скин! 🍀\n\n"
@@ -512,6 +627,81 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     data = query.data
+
+    if data == "admin_panel":
+        if user_id != DEVELOPER_ID:
+            await query.answer("⛔ Только для разработчика!", show_alert=True)
+            return
+        await query.edit_message_text(
+            "👑 **Админ-панель**\n\n"
+            "Выберите действие:",
+            reply_markup=admin_panel_buttons(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "admin_logs":
+        if user_id != DEVELOPER_ID:
+            await query.answer("⛔ Только для разработчика!", show_alert=True)
+            return
+        admin_state[user_id] = "logs"
+        await query.edit_message_text(
+            "📋 **Логи игрока**\n\n"
+            "Введите **@username** игрока:",
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "admin_refs":
+        if user_id != DEVELOPER_ID:
+            await query.answer("⛔ Только для разработчика!", show_alert=True)
+            return
+        refs = get_all_referrals()
+        if not refs:
+            text = "👥 **Реферальная система**\n\nНет рефералов."
+        else:
+            text = "👥 **Реферальная система**\n\n"
+            for r in refs[:30]:
+                referrer = r[1] if r[1] else f"ID{r[0]}"
+                referral = r[3] if r[3] else f"ID{r[2]}"
+                bonus = "✅" if r[5] else "❌"
+                text += f"👤 {referrer} → {referral} {bonus}\n"
+            if len(refs) > 30:
+                text += f"\n... и ещё {len(refs)-30} записей"
+        await query.edit_message_text(
+            text,
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "admin_broadcast":
+        if user_id != DEVELOPER_ID:
+            await query.answer("⛔ Только для разработчика!", show_alert=True)
+            return
+        admin_state[user_id] = "broadcast"
+        await query.edit_message_text(
+            "📢 **Сообщение всем пользователям**\n\n"
+            "Введите текст для рассылки:",
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("reply_"):
+        if user_id != DEVELOPER_ID:
+            await query.answer("⛔ Только для разработчика!", show_alert=True)
+            return
+        target_id = int(data.split("_")[1])
+        support_requests[user_id] = {"step": "replying", "target_id": target_id}
+        await query.edit_message_text(
+            f"✏️ **Напишите ответ** для игрока (ID: {target_id}):\n\n"
+            f"Просто отправьте сообщение, и бот перешлёт его игроку.",
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
+        return
 
     if data.startswith("mines_mines_") or data.startswith("mines_cell_") or data == "mines_cashout":
         if data.startswith("mines_mines_"):
@@ -529,6 +719,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del deposit_timer[user_id]
         if user_id in dev_add_data:
             del dev_add_data[user_id]
+        if user_id in waiting_for_collab:
+            del waiting_for_collab[user_id]
+        if user_id in support_requests:
+            del support_requests[user_id]
+        if user_id in admin_state:
+            del admin_state[user_id]
         await query.edit_message_text("🔙 Главное меню", reply_markup=main_menu(user_id))
         return
 
@@ -549,6 +745,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"🏆 Самый дорогой скин: нет\n"
         text += f"📦 Всего предметов: {inventory_count}\n"
         await query.edit_message_text(text, reply_markup=profile_menu(), parse_mode="Markdown")
+        return
+
+    if data == "referral_system":
+        refs = get_referrals(user_id)
+        ref_count = len(refs)
+        bonus_count = sum(1 for r in refs if r[2] == 1)
+        total_earned = bonus_count * 10
+        
+        link = f"https://t.me/Standoff2Lucky_bot?start={user_id}"
+        
+        text = f"👥 **Реферальная система**\n\n"
+        text += f"Приглашай друзей и получай бонусы!\n\n"
+        text += f"🔗 **Твоя ссылка:**\n`{link}`\n\n"
+        text += f"📊 **Статистика:**\n"
+        text += f"• Приглашено: {ref_count}\n"
+        text += f"• Получено бонусов: {bonus_count}\n"
+        text += f"• Заработано: {total_earned} G\n\n"
+        text += f"💡 **Как получить бонус:**\n"
+        text += f"1. Друг переходит по ссылке\n"
+        text += f"2. Забирает бесплатный бонус (+20 G)\n"
+        text += f"3. Играет в мины (1 раз)\n"
+        text += f"4. Ты получаешь +10 G! 🎉"
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "history":
@@ -578,18 +802,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "support":
         await query.edit_message_text(
             "🛠 **Тех. Поддержка**\n\n"
-            "Напишите ваш вопрос или проблему сюда.\n"
+            "Напишите ваш вопрос или проблему одним сообщением.\n"
             "ОБЯЗАТЕЛЬНО ОСТАВЬТЕ СВОЙ ЮЗЕРНЕЙМ!!!\n\n"
-            "Администрация с вами свяжется.",
+            "Администрация свяжется с вами в ближайшее время.",
             reply_markup=back_button(),
             parse_mode="Markdown"
         )
+        support_requests[user_id] = {"step": "question"}
         return
 
     if data == "bonus":
         last_bonus = get_last_bonus(user_id)
         now = datetime.now()
         diff = now - last_bonus
+        
+        referral_info = check_referral_bonus(user_id)
+        referrer_claimed = False
+        
         if diff < timedelta(days=3):
             remaining = timedelta(days=3) - diff
             hours = remaining.seconds // 3600
@@ -603,9 +832,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             return
+        
         update_balance(user_id, 20)
         update_last_bonus(user_id)
         new_balance = get_balance(user_id)
+        
+        if referral_info and referral_info["bonus_claimed"] == 0:
+            conn = sqlite3.connect("cases_bot.db")
+            c = conn.cursor()
+            c.execute("UPDATE referrals SET bonus_claimed = 1 WHERE referral_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+        
         await query.edit_message_text(
             f"🎁 **Бонус получен!**\n\n"
             f"💰 Начислено: **+20 G**\n"
@@ -710,6 +948,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back_button(),
             parse_mode="Markdown"
         )
+        return
+
+    if data == "collab":
+        await query.edit_message_text(
+            "👔 Сотрудничество\n\n"
+            "Здравствуйте, сейчас мы в активных поисках ПИАР-МЕНЕДЖЕРОВ!\n\n"
+            "Если вы думаете, что хорошо подойдёте на данную должность, пожалуйста, заполните анкету ниже.\n\n"
+            "Ваша задача:\n"
+            "Снимать клипы/нарезки в TikTok либо YouTube Shorts о данном боте, а также играть под ником:\n"
+            "• @Standoff2Lucky_bot\n"
+            "• Либо @IntersoulShop\n\n"
+            "Выбирать можете сами!\n\n"
+            "Оплата за ваш труд:\n"
+            "• Баланс на бота для нового контента\n"
+            "• Либо внутриигровая валюта в игре\n\n"
+            "Анкета:\n\n"
+            "👔 Ваше имя:\n"
+            "👔 Ваш возраст:\n"
+            "👔 Сколько по времени собираетесь сотрудничать:\n"
+            "👔 Каким способом предпочитаете получать награду? (Балансом или Внутриигровой валютой)\n"
+            "👔 Какой тип контента собираетесь снимать:\n\n"
+            "Пример заполнения:\n"
+            "Александр\n"
+            "18\n"
+            "Всю жизнь\n"
+            "Балансом\n"
+            "Различные пути\n\n"
+            "✏️ Напишите ответы на вопросы одним сообщением, и я отправлю их разработчику!",
+            reply_markup=back_button()
+        )
+        waiting_for_collab[user_id] = True
         return
 
     if data == "mines_menu":
@@ -1053,6 +1322,156 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
+    if user_id == DEVELOPER_ID and user_id in admin_state and admin_state[user_id] == "logs":
+        username = text.strip()
+        if username.startswith("@"):
+            username = username[1:]
+        target_id = get_user_by_username(username)
+        if not target_id:
+            await update.message.reply_text(
+                f"❌ Игрок @{username} не найден в базе данных!",
+                reply_markup=back_button()
+            )
+            del admin_state[user_id]
+            return
+        logs = get_user_logs(target_id)
+        if not logs:
+            text = f"📋 **Логи игрока @{username}**\n\nНет записей."
+        else:
+            text = f"📋 **Логи игрока @{username}**\n\n"
+            for action, amount, details, date in logs[:30]:
+                text += f"📅 {date}\n{action}"
+                if amount:
+                    text += f" ({amount} G)"
+                if details:
+                    text += f" — {details}"
+                text += "\n\n"
+        await update.message.reply_text(
+            text,
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
+        del admin_state[user_id]
+        return
+    
+    if user_id == DEVELOPER_ID and user_id in admin_state and admin_state[user_id] == "broadcast":
+        broadcast_text = text
+        users = get_all_users()
+        success = 0
+        fail = 0
+        
+        await update.message.reply_text(
+            f"📢 **Начинаю рассылку...**\n\n"
+            f"👥 Всего пользователей: {len(users)}\n"
+            f"⏳ Это может занять некоторое время.",
+            parse_mode="Markdown"
+        )
+        
+        for uid in users:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📢 **Сообщение от администрации:**\n\n"
+                         f"{broadcast_text}",
+                    parse_mode="Markdown"
+                )
+                success += 1
+            except:
+                fail += 1
+            await asyncio.sleep(0.05)
+        
+        await update.message.reply_text(
+            f"✅ **Рассылка завершена!**\n\n"
+            f"📤 Отправлено: {success}\n"
+            f"❌ Не доставлено: {fail}",
+            reply_markup=admin_panel_buttons()
+        )
+        del admin_state[user_id]
+        return
+    
+    if user_id in support_requests and support_requests[user_id].get("step") == "question":
+        question_text = text
+        username = update.effective_user.username or "без юзернейма"
+        
+        try:
+            await context.bot.send_message(
+                chat_id=DEVELOPER_ID,
+                text=f"📩 **НОВЫЙ ВОПРОС В ПОДДЕРЖКУ**\n\n"
+                     f"👤 От: @{username}\n"
+                     f"🆔 ID: {user_id}\n\n"
+                     f"📝 **Вопрос:**\n"
+                     f"{question_text}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{user_id}")]
+                ]),
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(
+                f"✅ **Ваш вопрос отправлен!**\n\n"
+                f"Администратор свяжется с вами в ближайшее время. 📩",
+                reply_markup=main_menu(user_id)
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Ошибка при отправке вопроса. Попробуйте позже.",
+                reply_markup=main_menu(user_id)
+            )
+            print(f"Ошибка отправки вопроса: {e}")
+        
+        del support_requests[user_id]
+        return
+    
+    if user_id == DEVELOPER_ID and user_id in support_requests and support_requests[user_id].get("step") == "replying":
+        target_id = support_requests[user_id]["target_id"]
+        reply_text = text
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"🛠 **Ответ от администрации:**\n\n"
+                     f"{reply_text}",
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(
+                f"✅ **Ответ отправлен!**\n\n"
+                f"Сообщение доставлено игроку.",
+                reply_markup=main_menu(user_id)
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Ошибка при отправке ответа:\n{str(e)}",
+                reply_markup=main_menu(user_id)
+            )
+        
+        del support_requests[user_id]
+        return
+    
+    if user_id in waiting_for_collab and waiting_for_collab[user_id]:
+        try:
+            await context.bot.send_message(
+                chat_id=DEVELOPER_ID,
+                text=f"📩 **НОВАЯ АНКЕТА!**\n\n"
+                     f"👤 От: @{update.effective_user.username or 'без юзернейма'}\n"
+                     f"🆔 ID: {user_id}\n\n"
+                     f"📝 **Ответы:**\n\n"
+                     f"{text}",
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(
+                f"✅ **Анкета отправлена!**\n\n"
+                f"Спасибо за проявленный интерес! Мы свяжемся с вами в ближайшее время. 🍀",
+                reply_markup=main_menu(user_id)
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Ошибка при отправке анкеты. Попробуйте позже.",
+                reply_markup=main_menu(user_id)
+            )
+            print(f"Ошибка отправки анкеты: {e}")
+        
+        del waiting_for_collab[user_id]
+        return
+    
     if user_id in dev_add_data:
         if dev_add_data[user_id]["step"] == "username":
             username = text.strip()
@@ -1123,6 +1542,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Не хватает G! Нужно {bet}, у тебя {balance}")
             return
         deduct_balance(user_id, bet)
+        add_log(user_id, "Ставка в мины", bet)
         if game_type == "mines":
             await update.message.reply_text(
                 f"💣 **Мины**\n\n"
@@ -1236,6 +1656,7 @@ async def mines_cell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown"
         )
+        add_log(user_id, "Проигрыш в минах", game["bet"])
         return
     mines_count = game["mines_count"]
     multiplier = MINE_MULTIPLIERS.get(mines_count, 1.0)
@@ -1256,20 +1677,71 @@ async def mines_cashout_handler(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    
     if user_id not in mines_data:
         await query.edit_message_text("❌ Ошибка. Начни заново.", reply_markup=main_menu(user_id))
         return
+    
     game = mines_data[user_id]
+    
     if game["game_over"]:
         await query.answer("Игра уже окончена!", show_alert=True)
         return
+    
     if len(game["opened"]) == 0:
         await query.answer("Открой хотя бы одну клетку!", show_alert=True)
         return
+    
     win = round(game["bet"] * game["multiplier"], 2)
     update_balance(user_id, win)
     new_balance = get_balance(user_id)
+    
+    add_log(user_id, "Выигрыш в минах", win)
+    
+    referral_info = check_referral_bonus(user_id)
+    if referral_info and referral_info["bonus_claimed"] == 1:
+        conn = sqlite3.connect("cases_bot.db")
+        c = conn.cursor()
+        c.execute("SELECT bonus_claimed FROM referrals WHERE referral_id = ? AND bonus_claimed = 1", (user_id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            conn = sqlite3.connect("cases_bot.db")
+            c = conn.cursor()
+            c.execute("SELECT referrer_id FROM referrals WHERE referral_id = ?", (user_id,))
+            ref_result = c.fetchone()
+            conn.close()
+            
+            if ref_result:
+                referrer_id = ref_result[0]
+                conn = sqlite3.connect("cases_bot.db")
+                c = conn.cursor()
+                c.execute("SELECT bonus_claimed FROM referrals WHERE referral_id = ? AND bonus_claimed = 2", (user_id,))
+                result = c.fetchone()
+                conn.close()
+                
+                if not result:
+                    update_balance(referrer_id, 10)
+                    conn = sqlite3.connect("cases_bot.db")
+                    c = conn.cursor()
+                    c.execute("UPDATE referrals SET bonus_claimed = 2 WHERE referral_id = ?", (user_id,))
+                    conn.commit()
+                    conn.close()
+                    
+                    try:
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=f"🎉 **Реферальный бонус!**\n\n"
+                                 f"Ваш друг выполнил условия!\n"
+                                 f"💰 Вы получили +10 G!",
+                            parse_mode="Markdown"
+                        )
+                    except:
+                        pass
+    
     del mines_data[user_id]
+    
     await query.edit_message_text(
         f"💰 **Вы забрали выигрыш!**\n\n"
         f"🏆 Выигрыш: {win} G\n"
