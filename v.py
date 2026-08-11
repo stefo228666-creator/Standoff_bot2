@@ -1391,13 +1391,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("withdraw_"):
         item_id = int(data.split("_")[1])
         waiting_for_pattern[user_id] = {"item_id": item_id}
-        await query.edit_message_text(
-            f"💎 **Введите паттерн** для выставляемого скина:\n\n"
-            f"Например: `123` или `456`\n\n"
-            f"Паттерн можно посмотреть в игре.",
-            reply_markup=back_button(),
-            parse_mode="Markdown"
-        )
+        
+        conn = sqlite3.connect("cases_bot.db", timeout=10)
+        c = conn.cursor()
+        c.execute("SELECT item_name, item_price FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", 
+                  (item_id, user_id))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            item_name, item_price = result
+            final_price = item_price * 1.2  # БЕЗ ОКРУГЛЕНИЯ!
+            await query.edit_message_text(
+                f"💎 **Выставь скин G22 \"Adam\"**\n\n"
+                f"🔫 Твой скин: **{item_name}**\n"
+                f"💰 Цена для рынка: **{final_price} G**\n"
+                f"(+20% комиссия рынка)\n\n"
+                f"📝 Введи **паттерн** в следующем сообщении:",
+                reply_markup=back_button(),
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text("❌ Ошибка: предмет не найден.", reply_markup=back_button())
         return
 
     if data.startswith("quick_sell_"):
@@ -1431,10 +1446,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Кейс не найден", reply_markup=main_menu(user_id))
             return
         items_text = "📋 **Возможные скины:**\n\n"
-        for item in case["items"][:5]:
+        for item in case["items"]:
             items_text += f"🔥 {item['name']} — {item['price']} G\n"
-        if len(case["items"]) > 5:
-            items_text += f"... и ещё {len(case['items'])-5} предметов\n"
         await query.edit_message_text(
             f"🎯 **{case['name']}**\n"
             f"💰 Стоимость: {case['cost']} G\n\n"
@@ -1512,7 +1525,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_user_stats(user_id, "total_spent", cost)
         update_user_stats(user_id, "cases_opened", 1)
         
-        # Прогресс-бар
         msg = await query.edit_message_text(
             f"🎰 **Открываем кейс {case['name']}...**\n\n"
             f"▰▱▱▱▱▱▱▱▱▱ 10%",
@@ -2277,11 +2289,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del waiting_for_pattern[user_id]
             return
         
-        item_name, price, case_name = result
-        base_price = price * 1.2
-        random_cents = random.randint(1, 99) / 100
-        final_price = base_price + random_cents
-        final_price = round(final_price, 2)
+        item_name, item_price, case_name = result
+        final_price = item_price * 1.2  # БЕЗ ОКРУГЛЕНИЯ!
         
         try:
             user = await context.bot.get_chat(user_id)
@@ -2302,9 +2311,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(
                 f"💎 **Отлично!**\n\n"
-                f"Выставляй скин **{item_name}** за **{final_price} G**\n"
+                f"Выставь скин **G22 \"Adam\"**\n"
+                f"за **{final_price} G**\n"
                 f"с паттерном **{pattern}**\n\n"
-                f"🔄 Администратор скоро проверит и купит скин!",
+                f"🔄 Администратор скоро проверит и купит скин!\n"
+                f"✅ Скин будет продан через рынок!",
                 reply_markup=main_menu(user_id),
                 parse_mode="Markdown"
             )
