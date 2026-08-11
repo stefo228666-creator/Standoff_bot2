@@ -1401,7 +1401,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if result:
             item_name, item_price = result
-            final_price = item_price * 1.2  # БЕЗ ОКРУГЛЕНИЯ!
+            final_price = item_price * 1.2
             await query.edit_message_text(
                 f"💎 **Выставь скин G22 \"Adam\"**\n\n"
                 f"🔫 Твой скин: **{item_name}**\n"
@@ -2231,19 +2231,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(
                         f"❌ Игрок @{username} не найден в базе данных!\n"
                         f"Возможно, он ещё не запускал бота.",
+                        reply_markup=admin_panel_buttons(),
                         parse_mode="Markdown"
                     )
                     del dev_add_data[user_id]
                     return
                 update_balance(target_id, amount)
                 new_balance = get_balance(target_id)
+                
                 await update.message.reply_text(
                     f"✅ **Баланс пополнен!**\n\n"
                     f"👤 Игрок: @{username}\n"
                     f"💰 Начислено: {amount} G\n"
                     f"💳 Новый баланс: {new_balance} G",
+                    reply_markup=admin_panel_buttons(),
                     parse_mode="Markdown"
                 )
+                
                 try:
                     await context.bot.send_message(
                         chat_id=target_id,
@@ -2255,8 +2259,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except:
                     pass
+                
                 del dev_add_data[user_id]
                 return
+                
             except ValueError:
                 await update.message.reply_text("❌ Введите число!")
                 return
@@ -2290,7 +2296,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         item_name, item_price, case_name = result
-        final_price = item_price * 1.2  # БЕЗ ОКРУГЛЕНИЯ!
+        final_price = item_price * 1.2
         
         try:
             user = await context.bot.get_chat(user_id)
