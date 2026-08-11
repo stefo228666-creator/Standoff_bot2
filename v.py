@@ -683,6 +683,7 @@ support_requests = {}
 admin_state = {}
 waiting_for_promo = {}
 waiting_for_transfer = {}
+waiting_for_pattern = {}  # {user_id: item_id}
 banned_users = set()
 
 async def schedule_deposit_check(user_id, chat_id, context):
@@ -905,7 +906,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === НАВИГАЦИЯ ===
     if data == "back":
-        for d in (deposit_timer, dev_add_data, waiting_for_collab, support_requests, admin_state, waiting_for_promo):
+        for d in (deposit_timer, dev_add_data, waiting_for_collab, support_requests, admin_state, waiting_for_promo, waiting_for_transfer, waiting_for_pattern):
             d.pop(user_id, None)
         await query.edit_message_text("🔙 **Главное меню**", reply_markup=main_menu(user_id), parse_mode="Markdown")
         return
@@ -1387,27 +1388,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("withdraw_"):
         item_id = int(data.split("_")[1])
+        
+        # Проверяем, есть ли уже паттерн у этого скина
         conn = sqlite3.connect("cases_bot.db", timeout=10)
         c = conn.cursor()
-        c.execute("SELECT item_name, item_price FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", 
-                  (item_id, user_id))
+        c.execute("SELECT pattern FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", (item_id, user_id))
         result = c.fetchone()
         conn.close()
-        if result:
-            price = result[1]
-            base_price = price * 1.2
-            random_cents = random.randint(1, 99) / 100
-            final_price = base_price + random_cents
-            final_price = round(final_price, 2)
+        
+        if result and result[0]:
+            # Паттерн уже есть — сразу отправляем заявку
+            await process_withdraw_request(update, context, user_id, item_id, result[0])
+        else:
+            # Запрашиваем паттерн
+            waiting_for_pattern[user_id] = item_id
             await query.edit_message_text(
-                f"💎 **Отлично!**\n\n"
-                f"Выставляй скин **G22 \"Adam\"** за **{final_price} G** и ожидай!\n\n"
-                f"🔄 Администрация/бот скоро купит твой скин!",
+                f"🔢 **Введите паттерн скина**\n\n"
+                f"Паттерн состоит из 3 цифр.\n"
+                f"Пример: `264`",
                 reply_markup=back_button(),
                 parse_mode="Markdown"
             )
-        else:
-            await query.edit_message_text("❌ Ошибка: предмет не найден.", reply_markup=back_button())
         return
 
     if data.startswith("quick_sell_"):
@@ -1653,6 +1654,63 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_log(user_id, "Секретный кейс", secret_price, f"Редкость: {secret_rarity}")
         return
 
+# ==================== ФУНКЦИЯ ОБРАБОТКИ ЗАЯВКИ НА ВЫВОД ====================
+async def process_withdraw_request(update, context, user_id, item_id, pattern):
+    query = update.callback_query
+    conn = sqlite3.connect("cases_bot.db", timeout=10)
+    c = conn.cursor()
+    c.execute("SELECT item_name, item_price, case_name FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", 
+              (item_id, user_id))
+    result = c.fetchone()
+    conn.close()
+    
+    if not result:
+        await query.edit_message_text("❌ Ошибка: предмет не найден.", reply_markup=back_button())
+        return
+    
+    item_name = result[0]
+    price = result[1]
+    case_name = result[2] if result[2] else "Неизвестно"
+    
+    base_price = price * 1.2
+    random_cents = random.randint(1, 99) / 100
+    final_price = base_price + random_cents
+    final_price = round(final_price, 2)
+    
+    # ===== ОТПРАВКА ЗАЯВКИ РАЗРАБОТЧИКУ =====
+    try:
+        user = await context.bot.get_chat(user_id)
+        username = user.username if user.username else f"ID{user_id}"
+        
+        await context.bot.send_message(
+            chat_id=DEVELOPER_ID,
+            text=f"📩 **ЗАЯВКА НА ВЫВОД СКИНА**\n\n"
+                 f"👤 Игрок: @{username}\n"
+                 f"🆔 ID: {user_id}\n\n"
+                 f"🔫 Скин: **{item_name}**\n"
+                 f"📦 Откуда: **{case_name}**\n"
+                 f"💰 Цена вывода: **{final_price} G**\n"
+                 f"🔢 Паттерн: **{pattern}**\n\n"
+                 f"📌 Статус: **Ожидает проверки**\n"
+                 f"🔄 Нажмите «Ответить», чтобы связаться с игроком.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Ответить игроку", callback_data=f"reply_{user_id}")]
+            ]),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Ошибка отправки заявки: {e}")
+    # ==========================================
+    
+    await query.edit_message_text(
+        f"💎 **Отлично!**\n\n"
+        f"Выставляй скин **G22 \"Adam\"** за **{final_price} G** и ожидай!\n"
+        f"Не забудь указать паттерн: **{pattern}**\n\n"
+        f"🔄 Администрация/бот скоро купит твой скин!",
+        reply_markup=back_button(),
+        parse_mode="Markdown"
+    )
+
 async def fortune_spin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1755,6 +1813,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in banned_users:
         await update.message.reply_text("🛑 **Вы забанены!**\n\nОбратитесь к администратору.", parse_mode="Markdown")
+        return
+    
+    # === ВВОД ПАТТЕРНА ПОСЛЕ ВЫВОДА СКИНА ===
+    if user_id in waiting_for_pattern:
+        pattern = text.strip()
+        if not pattern.isdigit() or len(pattern) != 3:
+            await update.message.reply_text("❌ Паттерн должен состоять из 3 цифр!\n\nПример: `264`", parse_mode="Markdown")
+            return
+        
+        item_id = waiting_for_pattern[user_id]
+        
+        # Сохраняем паттерн в БД
+        conn = sqlite3.connect("cases_bot.db", timeout=10)
+        c = conn.cursor()
+        c.execute("UPDATE inventory SET pattern = ? WHERE id = ? AND telegram_id = ?", (pattern, item_id, user_id))
+        conn.commit()
+        conn.close()
+        
+        del waiting_for_pattern[user_id]
+        
+        # Отправляем заявку
+        await process_withdraw_request(update, context, user_id, item_id, pattern)
         return
     
     # === АДМИН: СОЗДАНИЕ ПРОМОКОДА ===
