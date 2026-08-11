@@ -555,6 +555,7 @@ def main_menu(user_id=None):
 
 def admin_panel_buttons():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👑 Пополнить игрока", callback_data="dev_add_balance")],
         [InlineKeyboardButton("📋 Логи", callback_data="admin_logs"),
          InlineKeyboardButton("👥 Реф система", callback_data="admin_refs")],
         [InlineKeyboardButton("📢 Сообщение всем", callback_data="admin_broadcast"),
@@ -683,7 +684,7 @@ support_requests = {}
 admin_state = {}
 waiting_for_promo = {}
 waiting_for_transfer = {}
-waiting_for_pattern = {}  # {user_id: item_id}
+waiting_for_pattern = {}
 banned_users = set()
 
 async def schedule_deposit_check(user_id, chat_id, context):
@@ -765,6 +766,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "dev_add_balance":
+        if user_id != DEVELOPER_ID:
+            await query.answer("⛔ Только для разработчика!", show_alert=True)
+            return
+        dev_add_data[user_id] = {"step": "username"}
+        await query.edit_message_text(
+            f"👑 **Пополнение баланса игрока**\n\n"
+            f"Введите **@username** игрока (например, @void4mo):",
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
+        return
+
     if data == "admin_logs":
         if user_id != DEVELOPER_ID:
             await query.answer("⛔ Только для разработчика!", show_alert=True)
@@ -826,9 +840,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_keys = c.fetchone()[0]
         c.execute("SELECT SUM(balance) FROM users")
         total_gold = c.fetchone()[0] or 0
+        c.execute("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 5")
+        top = c.fetchall()
         conn.close()
         
-        top = db_query("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 5", fetchall=True) or []
         top_text = "\n".join([f"• {row[0] or 'Аноним'} — {row[1]} G" for row in top]) if top else "Нет данных"
         
         text = f"📈 **Статистика бота**\n\n"
@@ -1241,19 +1256,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "dev_add_balance":
-        if user_id != DEVELOPER_ID:
-            await query.answer("⛔ Только для разработчика!", show_alert=True)
-            return
-        dev_add_data[user_id] = {"step": "username"}
-        await query.edit_message_text(
-            f"👑 **Пополнение баланса игрока**\n\n"
-            f"Введите **@username** игрока (например, @void4mo):",
-            reply_markup=back_button(),
-            parse_mode="Markdown"
-        )
-        return
-
     if data == "collab":
         await query.edit_message_text(
             "👔 **Сотрудничество**\n\n"
@@ -1388,27 +1390,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("withdraw_"):
         item_id = int(data.split("_")[1])
-        
-        # Проверяем, есть ли уже паттерн у этого скина
-        conn = sqlite3.connect("cases_bot.db", timeout=10)
-        c = conn.cursor()
-        c.execute("SELECT pattern FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", (item_id, user_id))
-        result = c.fetchone()
-        conn.close()
-        
-        if result and result[0]:
-            # Паттерн уже есть — сразу отправляем заявку
-            await process_withdraw_request(update, context, user_id, item_id, result[0])
-        else:
-            # Запрашиваем паттерн
-            waiting_for_pattern[user_id] = item_id
-            await query.edit_message_text(
-                f"🔢 **Введите паттерн скина**\n\n"
-                f"Паттерн состоит из 3 цифр.\n"
-                f"Пример: `264`",
-                reply_markup=back_button(),
-                parse_mode="Markdown"
-            )
+        waiting_for_pattern[user_id] = {"item_id": item_id}
+        await query.edit_message_text(
+            f"💎 **Введите паттерн** для выставляемого скина:\n\n"
+            f"Например: `123` или `456`\n\n"
+            f"Паттерн можно посмотреть в игре.",
+            reply_markup=back_button(),
+            parse_mode="Markdown"
+        )
         return
 
     if data.startswith("quick_sell_"):
@@ -1442,8 +1431,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Кейс не найден", reply_markup=main_menu(user_id))
             return
         items_text = "📋 **Возможные скины:**\n\n"
-        for item in case["items"]:
+        for item in case["items"][:5]:
             items_text += f"🔥 {item['name']} — {item['price']} G\n"
+        if len(case["items"]) > 5:
+            items_text += f"... и ещё {len(case['items'])-5} предметов\n"
         await query.edit_message_text(
             f"🎯 **{case['name']}**\n"
             f"💰 Стоимость: {case['cost']} G\n\n"
@@ -1639,7 +1630,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Открываем секретный кейс
         secret_price, secret_rarity = open_secret_case(user_id)
         new_balance = get_balance(user_id)
         
@@ -1653,63 +1643,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         add_log(user_id, "Секретный кейс", secret_price, f"Редкость: {secret_rarity}")
         return
-
-# ==================== ФУНКЦИЯ ОБРАБОТКИ ЗАЯВКИ НА ВЫВОД ====================
-async def process_withdraw_request(update, context, user_id, item_id, pattern):
-    query = update.callback_query
-    conn = sqlite3.connect("cases_bot.db", timeout=10)
-    c = conn.cursor()
-    c.execute("SELECT item_name, item_price, case_name FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", 
-              (item_id, user_id))
-    result = c.fetchone()
-    conn.close()
-    
-    if not result:
-        await query.edit_message_text("❌ Ошибка: предмет не найден.", reply_markup=back_button())
-        return
-    
-    item_name = result[0]
-    price = result[1]
-    case_name = result[2] if result[2] else "Неизвестно"
-    
-    base_price = price * 1.2
-    random_cents = random.randint(1, 99) / 100
-    final_price = base_price + random_cents
-    final_price = round(final_price, 2)
-    
-    # ===== ОТПРАВКА ЗАЯВКИ РАЗРАБОТЧИКУ =====
-    try:
-        user = await context.bot.get_chat(user_id)
-        username = user.username if user.username else f"ID{user_id}"
-        
-        await context.bot.send_message(
-            chat_id=DEVELOPER_ID,
-            text=f"📩 **ЗАЯВКА НА ВЫВОД СКИНА**\n\n"
-                 f"👤 Игрок: @{username}\n"
-                 f"🆔 ID: {user_id}\n\n"
-                 f"🔫 Скин: **{item_name}**\n"
-                 f"📦 Откуда: **{case_name}**\n"
-                 f"💰 Цена вывода: **{final_price} G**\n"
-                 f"🔢 Паттерн: **{pattern}**\n\n"
-                 f"📌 Статус: **Ожидает проверки**\n"
-                 f"🔄 Нажмите «Ответить», чтобы связаться с игроком.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ Ответить игроку", callback_data=f"reply_{user_id}")]
-            ]),
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        print(f"Ошибка отправки заявки: {e}")
-    # ==========================================
-    
-    await query.edit_message_text(
-        f"💎 **Отлично!**\n\n"
-        f"Выставляй скин **G22 \"Adam\"** за **{final_price} G** и ожидай!\n"
-        f"Не забудь указать паттерн: **{pattern}**\n\n"
-        f"🔄 Администрация/бот скоро купит твой скин!",
-        reply_markup=back_button(),
-        parse_mode="Markdown"
-    )
 
 async def fortune_spin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1734,7 +1667,7 @@ async def fortune_spin_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"{frame}",
             parse_mode="Markdown"
         )
-        time.sleep(0.3)
+        await asyncio.sleep(0.3)
     
     result = fortune_spin()
     game["result"] = result
@@ -1815,28 +1748,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🛑 **Вы забанены!**\n\nОбратитесь к администратору.", parse_mode="Markdown")
         return
     
-    # === ВВОД ПАТТЕРНА ПОСЛЕ ВЫВОДА СКИНА ===
-    if user_id in waiting_for_pattern:
-        pattern = text.strip()
-        if not pattern.isdigit() or len(pattern) != 3:
-            await update.message.reply_text("❌ Паттерн должен состоять из 3 цифр!\n\nПример: `264`", parse_mode="Markdown")
-            return
-        
-        item_id = waiting_for_pattern[user_id]
-        
-        # Сохраняем паттерн в БД
-        conn = sqlite3.connect("cases_bot.db", timeout=10)
-        c = conn.cursor()
-        c.execute("UPDATE inventory SET pattern = ? WHERE id = ? AND telegram_id = ?", (pattern, item_id, user_id))
-        conn.commit()
-        conn.close()
-        
-        del waiting_for_pattern[user_id]
-        
-        # Отправляем заявку
-        await process_withdraw_request(update, context, user_id, item_id, pattern)
-        return
-    
     # === АДМИН: СОЗДАНИЕ ПРОМОКОДА ===
     if user_id == DEVELOPER_ID and admin_state.get(user_id) == "promo_type":
         promo_type = text.strip().lower()
@@ -1844,6 +1755,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if promo_type not in valid_types:
             await update.message.reply_text(
                 f"❌ Неверный тип. Доступные: `balance`, `random_balance`, `random_skin`, `skin_fixed`, `multiple_skins`",
+                reply_markup=admin_panel_buttons(),
                 parse_mode="Markdown"
             )
             return
@@ -1945,7 +1857,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target_id:
             await update.message.reply_text(
                 f"❌ Игрок @{username} не найден в базе данных!",
-                reply_markup=back_button()
+                reply_markup=admin_panel_buttons()
             )
             del admin_state[user_id]
             return
@@ -2080,7 +1992,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # === АДМИН: ЛОГИ ===
-    if user_id == DEVELOPER_ID and user_id in admin_state and admin_state[user_id] == "logs":
+    if user_id == DEVELOPER_ID and admin_state.get(user_id) == "logs":
         username = text.strip()
         if username.startswith("@"):
             username = username[1:]
@@ -2113,7 +2025,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # === АДМИН: РАССЫЛКА ===
-    if user_id == DEVELOPER_ID and user_id in admin_state and admin_state[user_id] == "broadcast":
+    if user_id == DEVELOPER_ID and admin_state.get(user_id) == "broadcast":
         broadcast_text = text
         users = get_all_users()
         success = 0
@@ -2336,6 +2248,75 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 await update.message.reply_text("❌ Введите число!")
                 return
+    
+    # === ВЫВОД СКИНА (ВВОД ПАТТЕРНА) ===
+    if user_id in waiting_for_pattern:
+        pattern = text.strip()
+        if not pattern.isdigit():
+            await update.message.reply_text(
+                "❌ Паттерн должен быть числом!",
+                reply_markup=main_menu(user_id)
+            )
+            del waiting_for_pattern[user_id]
+            return
+        
+        item_id = waiting_for_pattern[user_id]["item_id"]
+        
+        conn = sqlite3.connect("cases_bot.db", timeout=10)
+        c = conn.cursor()
+        c.execute("SELECT item_name, item_price, case_name FROM inventory WHERE id = ? AND telegram_id = ? AND sold = 0", 
+                  (item_id, user_id))
+        result = c.fetchone()
+        conn.close()
+        
+        if not result:
+            await update.message.reply_text(
+                "❌ Ошибка: предмет не найден.",
+                reply_markup=main_menu(user_id)
+            )
+            del waiting_for_pattern[user_id]
+            return
+        
+        item_name, price, case_name = result
+        base_price = price * 1.2
+        random_cents = random.randint(1, 99) / 100
+        final_price = base_price + random_cents
+        final_price = round(final_price, 2)
+        
+        try:
+            user = await context.bot.get_chat(user_id)
+            username = user.username if user.username else f"ID{user_id}"
+            
+            await context.bot.send_message(
+                chat_id=DEVELOPER_ID,
+                text=f"📩 **ЗАЯВКА НА ВЫВОД СКИНА**\n\n"
+                     f"👤 Игрок: @{username}\n"
+                     f"🆔 ID: {user_id}\n\n"
+                     f"🔫 Скин: **{item_name}**\n"
+                     f"📦 Откуда: **{case_name or 'Неизвестно'}**\n"
+                     f"💰 Цена вывода: **{final_price} G**\n"
+                     f"🔢 Паттерн: **{pattern}**\n\n"
+                     f"📌 Статус: **Ожидает проверки**",
+                parse_mode="Markdown"
+            )
+            
+            await update.message.reply_text(
+                f"💎 **Отлично!**\n\n"
+                f"Выставляй скин **{item_name}** за **{final_price} G**\n"
+                f"с паттерном **{pattern}**\n\n"
+                f"🔄 Администратор скоро проверит и купит скин!",
+                reply_markup=main_menu(user_id),
+                parse_mode="Markdown"
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Ошибка при отправке заявки: {str(e)}",
+                reply_markup=main_menu(user_id)
+            )
+        
+        del waiting_for_pattern[user_id]
+        return
     
     # === МИНЫ / ФОРТУНА (СТАВКИ) ===
     if user_id not in waiting_for_bet:
@@ -2619,34 +2600,41 @@ def save_promo_to_db(update, context, data):
         conn.close()
         return
     
-    if promo_type == "balance":
-        c.execute("INSERT INTO promocodes (code, type, value, created_by, created_date) VALUES (?, ?, ?, ?, ?)",
-                  (code, promo_type, data["value"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    elif promo_type == "random_balance":
-        c.execute("INSERT INTO promocodes (code, type, min, max, created_by, created_date) VALUES (?, ?, ?, ?, ?, ?)",
-                  (code, promo_type, data["min"], data["max"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    elif promo_type == "random_skin":
-        c.execute("INSERT INTO promocodes (code, type, min, max, created_by, created_date) VALUES (?, ?, ?, ?, ?, ?)",
-                  (code, promo_type, data["min"], data["max"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    elif promo_type == "skin_fixed":
-        c.execute("INSERT INTO promocodes (code, type, value, created_by, created_date) VALUES (?, ?, ?, ?, ?)",
-                  (code, promo_type, data["value"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    elif promo_type == "multiple_skins":
-        c.execute("INSERT INTO promocodes (code, type, value, count, created_by, created_date) VALUES (?, ?, ?, ?, ?, ?)",
-                  (code, promo_type, data["value"], data["count"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    
-    conn.commit()
-    conn.close()
-    
-    update.message.reply_text(
-        f"✅ **Промокод создан!**\n\n"
-        f"🎫 Код: `{code}`\n"
-        f"📦 Тип: {promo_type}\n"
-        f"📌 Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"Теперь игроки могут его активировать!",
-        reply_markup=admin_panel_buttons(),
-        parse_mode="Markdown"
-    )
+    try:
+        if promo_type == "balance":
+            c.execute("INSERT INTO promocodes (code, type, value, created_by, created_date) VALUES (?, ?, ?, ?, ?)",
+                      (code, promo_type, data["value"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        elif promo_type == "random_balance":
+            c.execute("INSERT INTO promocodes (code, type, min, max, created_by, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+                      (code, promo_type, data["min"], data["max"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        elif promo_type == "random_skin":
+            c.execute("INSERT INTO promocodes (code, type, min, max, created_by, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+                      (code, promo_type, data["min"], data["max"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        elif promo_type == "skin_fixed":
+            c.execute("INSERT INTO promocodes (code, type, value, created_by, created_date) VALUES (?, ?, ?, ?, ?)",
+                      (code, promo_type, data["value"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        elif promo_type == "multiple_skins":
+            c.execute("INSERT INTO promocodes (code, type, value, count, created_by, created_date) VALUES (?, ?, ?, ?, ?, ?)",
+                      (code, promo_type, data["value"], data["count"], update.effective_user.id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        
+        conn.commit()
+        
+        update.message.reply_text(
+            f"✅ **Промокод создан!**\n\n"
+            f"🎫 Код: `{code}`\n"
+            f"📦 Тип: {promo_type}\n"
+            f"📌 Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"Теперь игроки могут его активировать!",
+            reply_markup=admin_panel_buttons(),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        update.message.reply_text(
+            f"❌ Ошибка при сохранении промокода: {str(e)}",
+            reply_markup=admin_panel_buttons()
+        )
+    finally:
+        conn.close()
 
 def main():
     init_db()
